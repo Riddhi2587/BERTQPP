@@ -1,0 +1,16 @@
+# Large generated/binary artifacts (regenerate locally via the scripts)
+models/*
+!models/README.md
+pklfiles/*
+!pklfiles/README.md
+
+run/result_files/
+run/msmarco.run-bm25-train-1000ret.txt
+
+# Large generated data files
+msmarco_train_query_*.tsv
+queries.train.tsv
+perquery_*.csv
+
+# Editor swap files
+*.swp
