@@ -4,7 +4,6 @@ models/*
 pklfiles/*
 !pklfiles/README.md
 
-run/result_files/
 run/msmarco.run-bm25-train-1000ret.txt
 
 # Large generated data files
