@@ -1,49 +1,69 @@
-import pyterrier as pt
-import pandas as pd
+import argparse
+import csv
+from collections import defaultdict
+import pytrec_eval
 
-if not pt.started():
-    pt.init()
 
-def compute_perquery_map(runfile, qrelsfile, cutoff=10):
+def parse_run(path, cutoff):
+    """TREC-style run file -> {qid: {docid: score}}, keeping only the top `cutoff` docs per query by rank."""
+    ranked = defaultdict(list)
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            qid, _, docid, rank, score, _ = parts[:6]
+            ranked[qid].append((int(rank), docid, float(score)))
+
+    run = {}
+    for qid, docs in ranked.items():
+        docs.sort(key=lambda x: x[0])
+        run[qid] = {docid: score for _, docid, score in docs[:cutoff]}
+    return run
+
+
+def compute_perquery_metric(runfile, qrelsfile, metric="MRR", cutoff=10):
     """
-    Compute per-query MAP@cutoff for a given run file and qrels file.
+    Compute per-query MRR@cutoff or MAP@cutoff using pytrec_eval.
 
     Args:
-        runfile (str): Path to the TREC .res run file.
-        qrelsfile (str): Path to the TREC qrels file.
-        cutoff (int): Cutoff for MAP (default: 10 for MAP@10).
+        runfile (str): Path to the TREC-style run file.
+        qrelsfile (str): Path to the qrels file.
+        metric (str): "MRR" or "MAP".
+        cutoff (int): Cutoff for the metric (default: 10).
 
     Returns:
-        pandas.DataFrame: Per-query MAP scores.
+        dict: {qid: metric_value}
     """
-    # Load qrels
-    qrels = pt.io.read_qrels(qrelsfile)
+    with open(qrelsfile) as f:
+        qrels = pytrec_eval.parse_qrel(f)
 
-    # Load run file
-    run_df = pd.read_csv(
-        runfile,
-        sep=r"\s+",
-        names=["qid", "iter", "docno", "rank", "score", "runid"]
-    )
+    run = parse_run(runfile, cutoff)
 
-    # Evaluate per-query MAP@cutoff
-    results = pt.Evaluate(run_df, qrels, metrics=[pt.measures.MRR @ cutoff], perquery=True)
-    # results = pt.Evaluate(run_df, qrels, metrics=[pt.measures.AP @ cutoff], perquery=True)
+    measure_name = "recip_rank" if metric == "MRR" else f"map_cut_{cutoff}"
+    evaluator = pytrec_eval.RelevanceEvaluator(qrels, {measure_name})
+    results = evaluator.evaluate(run)
 
-    # Convert to DataFrame
-    perquery_df = pd.DataFrame.from_dict(results, orient="index")
-    perquery_df.reset_index(inplace=True)
-    perquery_df.rename(columns={"index": "qid", f"MRR@{cutoff}": f"MRR@{cutoff}"}, inplace=True)
+    return {qid: scores[measure_name] for qid, scores in results.items()}
 
-    return perquery_df
 
-# Example usage
 if __name__ == "__main__":
-    runfile = "/media/pbclab/1o9SSD/payel/qpp/msmarco/bm25_ret/msmarco.run-bm25-train-1000ret.txt"
-    qrelsfile = "/media/pbclab/Elements/qpp/msmarco_dataset/Passage_Retrieval/msmarco.qrels-train.clean.txt"
+    parser = argparse.ArgumentParser(description="Compute per-query MRR/MAP@cutoff from a run file and qrels (via pytrec_eval).")
+    parser.add_argument("--run", type=str, required=True, help="Path to the TREC-style run file")
+    parser.add_argument("--qrels", type=str, required=True, help="Path to the qrels file")
+    parser.add_argument("--metric", type=str, default="MRR", choices=["MRR", "MAP"], help="Metric to compute (default: MRR)")
+    parser.add_argument("--cutoff", type=int, default=10, help="Cutoff for the metric (default: 10)")
+    parser.add_argument("--output", type=str, required=True, help="Output CSV path (columns: qid, {metric}@{cutoff})")
 
-    perquery_map = compute_perquery_map(runfile, qrelsfile, cutoff=10)
-    print(perquery_map.head())
-    perquery_map.to_csv("/media/pbclab/Elements/qpp/BERTQPP/perquery_mrr@10.csv", index=False)
-    # print("[INFO] Saved per-query MAP@10 to perquery_map@50.csv")
-    print("[INFO] Saved per-query MAP@10 to perquery_mrr@10.csv")
+    args = parser.parse_args()
+
+    per_query = compute_perquery_metric(args.run, args.qrels, metric=args.metric, cutoff=args.cutoff)
+    metric_col = f"{args.metric}@{args.cutoff}"
+
+    with open(args.output, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["qid", metric_col])
+        for qid, value in per_query.items():
+            writer.writerow([qid, value])
+
+    print(f"[INFO] Saved per-query {metric_col} for {len(per_query)} queries to {args.output}")
