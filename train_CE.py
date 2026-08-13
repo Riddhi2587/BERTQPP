@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import pickle
 
@@ -51,6 +52,9 @@ def train_with_epoch_checkpoints(model, train_dataloader, epochs, warmup_steps, 
 
     loss_fct = nn.BCEWithLogitsLoss() if model.config.num_labels == 1 else nn.CrossEntropyLoss()
 
+    log_path = f"{output_path}_training_log.json"
+    training_log = []
+
     for epoch in trange(epochs, desc="Epoch", disable=not show_progress_bar):
         model.model.zero_grad()
         model.model.train()
@@ -90,9 +94,16 @@ def train_with_epoch_checkpoints(model, train_dataloader, epochs, warmup_steps, 
         model.save(epoch_output_path)
         print(f"[INFO] Saved epoch {epoch_num} checkpoint to {epoch_output_path}")
 
+        log_entry = {"epoch": epoch_num, "avg_train_loss": avg_loss}
+
         if evaluator is not None:
             score = evaluator(model, output_path=epoch_output_path, epoch=epoch_num, steps=-1)
             print(f"[INFO] Epoch {epoch_num} evaluator score: {score}")
+            log_entry["evaluator_score"] = score
+
+        training_log.append(log_entry)
+        with open(log_path, "w") as f:
+            json.dump(training_log, f, indent=2)
 
 
 if __name__ == "__main__":
@@ -131,3 +142,4 @@ if __name__ == "__main__":
     )
 
     print(f"[INFO] Finished training. Per-epoch checkpoints saved as {args.output}_epoch1 .. {args.output}_epoch{args.epochs}")
+    print(f"[INFO] Training log saved to {args.output}_training_log.json")
