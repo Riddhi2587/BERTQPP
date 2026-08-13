@@ -55,7 +55,10 @@ def train_with_epoch_checkpoints(model, train_dataloader, epochs, warmup_steps, 
         model.model.zero_grad()
         model.model.train()
 
-        for features, labels in tqdm(train_dataloader, desc="Iteration", smoothing=0.05, disable=not show_progress_bar):
+        epoch_loss_sum = 0.0
+        epoch_steps = 0
+        pbar = tqdm(train_dataloader, desc="Iteration", smoothing=0.05, disable=not show_progress_bar)
+        for features, labels in pbar:
             with torch.cuda.amp.autocast(enabled=use_amp):
                 logits = model.model(**features, return_dict=True).logits
                 if model.config.num_labels == 1:
@@ -75,7 +78,14 @@ def train_with_epoch_checkpoints(model, train_dataloader, epochs, warmup_steps, 
             if scaler.get_scale() == scale_before_step:
                 scheduler.step()
 
+            epoch_loss_sum += loss_value.item()
+            epoch_steps += 1
+            pbar.set_postfix(loss=f"{loss_value.item():.4f}")
+
         epoch_num = epoch + 1
+        avg_loss = epoch_loss_sum / epoch_steps
+        print(f"[INFO] Epoch {epoch_num} average training loss: {avg_loss:.4f}")
+
         epoch_output_path = f"{output_path}_epoch{epoch_num}"
         model.save(epoch_output_path)
         print(f"[INFO] Saved epoch {epoch_num} checkpoint to {epoch_output_path}")
