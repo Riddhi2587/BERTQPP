@@ -27,13 +27,15 @@ def load_examples(pkl_path):
 
 def train_with_epoch_checkpoints(model, train_dataloader, epochs, warmup_steps, output_path,
                                   evaluator=None, weight_decay=0.01, max_grad_norm=1,
-                                  lr=2e-5, show_progress_bar=True):
+                                  lr=2e-5, use_amp=True, show_progress_bar=True):
     """Trains a CrossEncoder with one continuous optimizer/LR-schedule across all
     epochs (matching what a single CrossEncoder.fit(epochs=N) call does internally),
-    saving a checkpoint to f"{output_path}_epoch{N}" after every epoch.
+    saving a checkpoint to f"{output_path}_epoch{N}" after every epoch. Uses mixed
+    precision (autocast + GradScaler) whenever running on a CUDA device.
     """
     train_dataloader.collate_fn = model.smart_batching_collate
     model.model.to(model._target_device)
+    use_amp = use_amp and model._target_device.type == "cuda"
 
     num_train_steps = int(len(train_dataloader) * epochs)
 
@@ -45,6 +47,7 @@ def train_with_epoch_checkpoints(model, train_dataloader, epochs, warmup_steps, 
     ]
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=lr)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_train_steps)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     loss_fct = nn.BCEWithLogitsLoss() if model.config.num_labels == 1 else nn.CrossEntropyLoss()
 
@@ -53,15 +56,24 @@ def train_with_epoch_checkpoints(model, train_dataloader, epochs, warmup_steps, 
         model.model.train()
 
         for features, labels in tqdm(train_dataloader, desc="Iteration", smoothing=0.05, disable=not show_progress_bar):
-            logits = model.model(**features, return_dict=True).logits
-            if model.config.num_labels == 1:
-                logits = logits.view(-1)
-            loss_value = loss_fct(logits, labels)
-            loss_value.backward()
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                logits = model.model(**features, return_dict=True).logits
+                if model.config.num_labels == 1:
+                    logits = logits.view(-1)
+                loss_value = loss_fct(logits, labels)
+
+            scale_before_step = scaler.get_scale()
+            scaler.scale(loss_value).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.model.parameters(), max_grad_norm)
-            optimizer.step()
-            scheduler.step()
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
+
+            # GradScaler skips the optimizer step (and rescales down) on an inf/nan
+            # gradient -- skip the LR schedule step too so it stays in sync.
+            if scaler.get_scale() == scale_before_step:
+                scheduler.step()
 
         epoch_num = epoch + 1
         epoch_output_path = f"{output_path}_epoch{epoch_num}"
@@ -81,6 +93,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-labels", type=int, default=1, help="Number of output labels (default: 1, regression)")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--no-amp", action="store_true", help="Disable mixed precision (AMP). On by default when running on a CUDA device.")
     parser.add_argument("--output", type=str, required=True, help="Output path prefix; each epoch is saved to '<output>_epoch<N>'")
 
     args = parser.parse_args()
@@ -104,6 +117,7 @@ if __name__ == "__main__":
         warmup_steps=warmup_steps,
         output_path=args.output,
         evaluator=evaluator,
+        use_amp=not args.no_amp,
     )
 
     print(f"[INFO] Finished training. Per-epoch checkpoints saved as {args.output}_epoch1 .. {args.output}_epoch{args.epochs}")
